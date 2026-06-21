@@ -94,6 +94,39 @@ class Database:
             rows = await conn.fetch("SELECT * FROM users")
             return [dict(r) for r in rows]
 
+    async def get_admin_stats(self) -> Dict:
+        async with self.pool.acquire() as conn:
+            total_users = await conn.fetchval("SELECT COUNT(*) FROM users")
+            active_7d = await conn.fetchval("""
+                SELECT COUNT(DISTINCT user_id) FROM transactions
+                WHERE created_at >= NOW() - INTERVAL '7 days'
+            """)
+            active_30d = await conn.fetchval("""
+                SELECT COUNT(DISTINCT user_id) FROM transactions
+                WHERE created_at >= NOW() - INTERVAL '30 days'
+            """)
+            total_transactions = await conn.fetchval("SELECT COUNT(*) FROM transactions")
+            new_today = await conn.fetchval("""
+                SELECT COUNT(*) FROM users
+                WHERE created_at >= NOW() - INTERVAL '1 day'
+            """)
+            new_7d = await conn.fetchval("""
+                SELECT COUNT(*) FROM users
+                WHERE created_at >= NOW() - INTERVAL '7 days'
+            """)
+            total_assets = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM assets")
+            total_crypto = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM crypto_assets")
+            return {
+                "total_users": total_users,
+                "active_7d": active_7d,
+                "active_30d": active_30d,
+                "total_transactions": total_transactions,
+                "new_today": new_today,
+                "new_7d": new_7d,
+                "total_assets": total_assets,
+                "total_crypto": total_crypto,
+            }
+
     async def add_transaction(self, user_id: int, t_type: str, category: str,
                                amount: float, description: str = None, currency: str = "RUB") -> Dict:
         async with self.pool.acquire() as conn:
