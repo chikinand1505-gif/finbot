@@ -31,6 +31,7 @@ class Database:
                     type TEXT NOT NULL CHECK (type IN ('income', 'expense')),
                     category TEXT NOT NULL,
                     amount NUMERIC(12, 2) NOT NULL,
+                    currency TEXT DEFAULT 'RUB',
                     description TEXT,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
@@ -72,6 +73,10 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_crypto_assets_user_id ON crypto_assets(user_id);
             """)
+            # Migration: add currency column to transactions if not exists
+            await conn.execute("""
+                ALTER TABLE transactions ADD COLUMN IF NOT EXISTS currency TEXT DEFAULT 'RUB';
+            """)
             # Migration: add is_stablecoin if column doesn't exist yet
             await conn.execute("""
                 ALTER TABLE crypto_assets ADD COLUMN IF NOT EXISTS is_stablecoin BOOLEAN DEFAULT FALSE;
@@ -90,12 +95,12 @@ class Database:
             return [dict(r) for r in rows]
 
     async def add_transaction(self, user_id: int, t_type: str, category: str,
-                               amount: float, description: str = None) -> Dict:
+                               amount: float, description: str = None, currency: str = "RUB") -> Dict:
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
-                INSERT INTO transactions (user_id, type, category, amount, description)
-                VALUES ($1, $2, $3, $4, $5) RETURNING *
-            """, user_id, t_type, category, amount, description)
+                INSERT INTO transactions (user_id, type, category, amount, description, currency)
+                VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
+            """, user_id, t_type, category, amount, description, currency)
             return dict(row)
 
     async def delete_transaction(self, tx_id: int, user_id: int) -> bool:
@@ -114,37 +119,59 @@ class Database:
             """, user_id, limit)
             return [dict(r) for r in rows]
 
-    async def get_monthly_stats(self, user_id: int) -> Dict:
+    async def get_monthly_stats(self, user_id: int, usdt_rate: float = 77.0) -> Dict:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
-                SELECT type, SUM(amount) as total FROM transactions
+                SELECT type, currency, SUM(amount) as total FROM transactions
                 WHERE user_id = $1
                   AND DATE_TRUNC('month', created_at) = DATE_TRUNC('month', NOW())
-                GROUP BY type
+                GROUP BY type, currency
             """, user_id)
-            result = {}
+            result = {"income": 0, "expense": 0, "income_usdt": 0, "expense_usdt": 0}
             for row in rows:
-                result[row["type"]] = float(row["total"])
+                amt = float(row["total"])
+                cur = row["currency"] or "RUB"
+                amt_rub = amt if cur == "RUB" else amt * usdt_rate
+                amt_usdt = amt if cur == "USDT" else amt / usdt_rate
+                if row["type"] == "income":
+                    result["income"] += amt_rub
+                    result["income_usdt"] += amt_usdt
+                else:
+                    result["expense"] += amt_rub
+                    result["expense_usdt"] += amt_usdt
             return result
 
-    async def get_last_30_days_stats(self, user_id: int) -> Dict:
+    async def get_last_30_days_stats(self, user_id: int, usdt_rate: float = 77.0) -> Dict:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
-                SELECT type, SUM(amount) as total FROM transactions
+                SELECT type, currency, SUM(amount) as total FROM transactions
                 WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '30 days'
-                GROUP BY type
+                GROUP BY type, currency
             """, user_id)
-            result = {"income": 0, "expense": 0, "categories": {}}
+            result = {"income": 0, "expense": 0, "income_usdt": 0, "expense_usdt": 0, "categories": {}}
             for row in rows:
-                result[row["type"]] = float(row["total"])
+                amt = float(row["total"])
+                cur = row["currency"] or "RUB"
+                amt_rub = amt if cur == "RUB" else amt * usdt_rate
+                amt_usdt = amt if cur == "USDT" else amt / usdt_rate
+                if row["type"] == "income":
+                    result["income"] += amt_rub
+                    result["income_usdt"] += amt_usdt
+                else:
+                    result["expense"] += amt_rub
+                    result["expense_usdt"] += amt_usdt
             cat_rows = await conn.fetch("""
-                SELECT category, SUM(amount) as total FROM transactions
+                SELECT category, currency, SUM(amount) as total FROM transactions
                 WHERE user_id = $1 AND type = 'expense'
                   AND created_at >= NOW() - INTERVAL '30 days'
-                GROUP BY category ORDER BY total DESC
+                GROUP BY category, currency ORDER BY total DESC
             """, user_id)
             for row in cat_rows:
-                result["categories"][row["category"]] = float(row["total"])
+                amt = float(row["total"])
+                cur = row["currency"] or "RUB"
+                amt_rub = amt if cur == "RUB" else amt * usdt_rate
+                cat = row["category"]
+                result["categories"][cat] = result["categories"].get(cat, 0) + amt_rub
             return result
 
     async def get_total_balance(self, user_id: int) -> float:
