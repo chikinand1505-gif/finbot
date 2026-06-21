@@ -1115,6 +1115,31 @@ async def cap_delete_crypto(callback: types.CallbackQuery):
 
 
 
+ADMIN_ID = 496113112
+
+
+@dp.message(Command("стата", "stats"))
+async def cmd_stats(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    stats = await db.get_admin_stats()
+    await message.answer(
+        f"📊 <b>Статистика бота</b>\n\n"
+        f"👥 <b>Пользователи:</b>\n"
+        f"  Всего: <b>{stats['total_users']}</b>\n"
+        f"  Новых сегодня: <b>{stats['new_today']}</b>\n"
+        f"  Новых за 7 дней: <b>{stats['new_7d']}</b>\n\n"
+        f"🔥 <b>Активность:</b>\n"
+        f"  Активны за 7 дней: <b>{stats['active_7d']}</b>\n"
+        f"  Активны за 30 дней: <b>{stats['active_30d']}</b>\n\n"
+        f"💸 <b>Данные:</b>\n"
+        f"  Всего транзакций: <b>{stats['total_transactions']}</b>\n"
+        f"  Используют капитал: <b>{stats['total_assets']}</b>\n"
+        f"  Используют крипто: <b>{stats['total_crypto']}</b>",
+        parse_mode="HTML"
+    )
+
+
 @dp.message(Command("анализ", "analysis"))
 async def cmd_analysis(message: types.Message):
     await message.answer("⏳ Анализирую финансы...")
