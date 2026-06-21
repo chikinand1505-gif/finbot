@@ -281,53 +281,101 @@ def get_asset_label(asset_type: str) -> str:
 
 
 async def get_exchange_rates() -> dict:
-    """Fetch live exchange rates. Returns rates TO RUB and USD/RUB for conversion."""
+    """Fetch live exchange rates. USDT from P2P sources, BTC from CoinGecko, USD/EUR from CBR."""
     import aiohttp
     rates = {"RUB": 1.0}
-    try:
-        async with aiohttp.ClientSession() as session:
-            # USDT and BTC in RUB and USD from CoinGecko
+
+    async with aiohttp.ClientSession() as session:
+
+        # USDT/RUB — пробуем несколько источников по порядку
+        usdt_rub = None
+
+        # 1. Garantex (российская P2P биржа, реальный рыночный курс)
+        try:
+            async with session.get(
+                "https://garantex.org/api/v2/depth?market=usdtrub",
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    bids = data.get("bids", [])
+                    if bids:
+                        usdt_rub = float(bids[0]["price"])
+        except Exception:
+            pass
+
+        # 2. Binance P2P через их API (если Garantex недоступен)
+        if not usdt_rub:
             try:
-                async with session.get(
-                    "https://api.coingecko.com/api/v3/simple/price"
-                    "?ids=tether,bitcoin&vs_currencies=rub,usd",
-                    timeout=aiohttp.ClientTimeout(total=6)
+                async with session.post(
+                    "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search",
+                    json={
+                        "asset": "USDT",
+                        "fiat": "RUB",
+                        "merchantCheck": False,
+                        "page": 1,
+                        "payTypes": [],
+                        "rows": 3,
+                        "tradeType": "BUY"
+                    },
+                    headers={"Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=5)
                 ) as r:
                     if r.status == 200:
                         data = await r.json()
-                        rates["USDT"] = data["tether"]["rub"]
-                        rates["BTC"] = data["bitcoin"]["rub"]
-                        rates["USDT_USD"] = data["tether"]["usd"]
-                        rates["BTC_USD"] = data["bitcoin"]["usd"]
+                        ads = data.get("data", [])
+                        if ads:
+                            prices = [float(ad["adv"]["price"]) for ad in ads[:3]]
+                            usdt_rub = sum(prices) / len(prices)
             except Exception:
-                rates["USDT"] = 72.5
-                rates["BTC"] = 9_000_000.0
-                rates["USDT_USD"] = 1.0
-                rates["BTC_USD"] = 100_000.0
+                pass
 
-            # USD and EUR from CBR
+        # 3. CoinGecko как запасной (менее точный)
+        if not usdt_rub:
             try:
                 async with session.get(
-                    "https://www.cbr-xml-daily.ru/daily_json.js",
-                    timeout=aiohttp.ClientTimeout(total=6)
+                    "https://api.coingecko.com/api/v3/simple/price?ids=tether&vs_currencies=rub",
+                    timeout=aiohttp.ClientTimeout(total=5)
                 ) as r:
                     if r.status == 200:
-                        data = await r.json(content_type=None)
-                        rates["USD"] = data["Valute"]["USD"]["Value"]
-                        rates["EUR"] = data["Valute"]["EUR"]["Value"]
+                        data = await r.json()
+                        usdt_rub = data["tether"]["rub"]
             except Exception:
-                rates["USD"] = 72.5
-                rates["EUR"] = 80.0
-    except Exception:
-        rates.setdefault("USDT", 72.5)
-        rates.setdefault("BTC", 9_000_000.0)
-        rates.setdefault("USD", 72.5)
-        rates.setdefault("EUR", 80.0)
+                pass
+
+        rates["USDT"] = usdt_rub or 77.0
+
+        # BTC/RUB через USDT (BTC/USDT * USDT/RUB)
+        try:
+            async with session.get(
+                "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    rates["BTC"] = float(data["price"]) * rates["USDT"]
+        except Exception:
+            rates["BTC"] = 9_000_000.0
+
+        # USD и EUR от ЦБ
+        try:
+            async with session.get(
+                "https://www.cbr-xml-daily.ru/daily_json.js",
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json(content_type=None)
+                    rates["USD"] = data["Valute"]["USD"]["Value"]
+                    rates["EUR"] = data["Valute"]["EUR"]["Value"]
+        except Exception:
+            rates["USD"] = rates["USDT"]
+            rates["EUR"] = rates["USDT"] * 1.08
+
     return rates
 
 
 def rub_to_usd(rub: float, rates: dict) -> float:
-    usd_rate = rates.get("USD", 72.5)
+    usd_rate = rates.get("USD", 77.0)
     return rub / usd_rate if usd_rate else 0
 
 
