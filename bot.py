@@ -147,17 +147,25 @@ async def section_finance(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "fin_balance")
 async def fin_balance(callback: types.CallbackQuery):
-    stats = await db.get_monthly_stats(callback.from_user.id)
+    rates = await get_exchange_rates()
+    usdt_rate = rates.get("USDT", 77.0)
+    stats = await db.get_monthly_stats(callback.from_user.id, usdt_rate)
     total = await db.get_total_balance(callback.from_user.id)
+
     income = stats.get("income", 0)
     expense = stats.get("expense", 0)
+    income_usdt = stats.get("income_usdt", 0)
+    expense_usdt = stats.get("expense_usdt", 0)
     net = income - expense
+    net_usdt = income_usdt - expense_usdt
+
     await callback.message.edit_text(
         f"💼 <b>Баланс за текущий месяц</b>\n\n"
-        f"💰 Доходы: <b>+{income:,.0f} ₽</b>\n"
-        f"💸 Расходы: <b>-{expense:,.0f} ₽</b>\n"
-        f"{'📈' if net >= 0 else '📉'} Итого: <b>{'+' if net >= 0 else ''}{net:,.0f} ₽</b>\n\n"
-        f"🏦 Общий баланс трат: <b>{total:,.0f} ₽</b>",
+        f"💰 Доходы: <b>+{income:,.0f} ₽</b> / <b>+{income_usdt:,.2f} ₮</b>\n"
+        f"💸 Расходы: <b>-{expense:,.0f} ₽</b> / <b>-{expense_usdt:,.2f} ₮</b>\n"
+        f"{'📈' if net >= 0 else '📉'} Итого: <b>{'+' if net >= 0 else ''}{net:,.0f} ₽</b> / <b>{'+' if net_usdt >= 0 else ''}{net_usdt:,.2f} ₮</b>\n\n"
+        f"🏦 Общий баланс трат: <b>{total:,.0f} ₽</b> / <b>{total/usdt_rate:,.2f} ₮</b>\n\n"
+        f"<i>🕐 1 ₮ = {usdt_rate:,.1f} ₽</i>",
         parse_mode="HTML", reply_markup=finance_kb()
     )
 
@@ -237,14 +245,20 @@ async def fin_charts(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "fin_analysis")
 async def fin_analysis(callback: types.CallbackQuery):
     await callback.message.edit_text("🤖 <b>AI-анализ</b>\n\n⏳ Анализирую...", parse_mode="HTML")
-    stats = await db.get_last_30_days_stats(callback.from_user.id)
+    rates = await get_exchange_rates()
+    usdt_rate = rates.get("USDT", 77.0)
+    stats = await db.get_last_30_days_stats(callback.from_user.id, usdt_rate)
     if stats["income"] == 0 and stats["expense"] == 0:
         await callback.message.edit_text("📭 Нет данных за 30 дней.", reply_markup=finance_kb())
         return
     try:
         analysis = await get_full_analysis(stats)
+        income_usdt = stats.get("income_usdt", 0)
+        expense_usdt = stats.get("expense_usdt", 0)
         await callback.message.edit_text(
-            f"🤖 <b>AI-анализ за 30 дней</b>\n\n{analysis}",
+            f"🤖 <b>AI-анализ за 30 дней</b>\n\n{analysis}\n\n"
+            f"<i>💱 В USDT: доходы {income_usdt:,.2f} ₮ / расходы {expense_usdt:,.2f} ₮\n"
+            f"1 ₮ = {usdt_rate:,.1f} ₽</i>",
             parse_mode="HTML", reply_markup=finance_kb()
         )
     except Exception:
@@ -1104,13 +1118,22 @@ async def cap_delete_crypto(callback: types.CallbackQuery):
 @dp.message(Command("анализ", "analysis"))
 async def cmd_analysis(message: types.Message):
     await message.answer("⏳ Анализирую финансы...")
-    stats = await db.get_last_30_days_stats(message.from_user.id)
+    rates = await get_exchange_rates()
+    usdt_rate = rates.get("USDT", 77.0)
+    stats = await db.get_last_30_days_stats(message.from_user.id, usdt_rate)
     if stats["income"] == 0 and stats["expense"] == 0:
         await message.answer("📭 За последние 30 дней нет записей.")
         return
     try:
         analysis = await get_full_analysis(stats)
-        await message.answer(f"📊 <b>Анализ за 30 дней</b>\n\n{analysis}", parse_mode="HTML")
+        income_usdt = stats.get("income_usdt", 0)
+        expense_usdt = stats.get("expense_usdt", 0)
+        await message.answer(
+            f"📊 <b>Анализ за 30 дней</b>\n\n{analysis}\n\n"
+            f"<i>💱 В USDT: доходы {income_usdt:,.2f} ₮ / расходы {expense_usdt:,.2f} ₮\n"
+            f"1 ₮ = {usdt_rate:,.1f} ₽</i>",
+            parse_mode="HTML"
+        )
     except Exception:
         await message.answer("⚠️ AI-анализ недоступен — пополни баланс на console.anthropic.com")
 
@@ -1245,19 +1268,75 @@ async def handle_text(message: types.Message, state: FSMContext):
         parse_mode="HTML", reply_markup=main_kb()
     )
 
+_pending_transactions: dict = {}
+
+
 async def handle_new_transaction(message: types.Message, t: dict):
     await db.create_user(message.from_user.id, message.from_user.full_name)
-    await db.add_transaction(
-        user_id=message.from_user.id,
-        t_type=t["type"], category=t["category"],
-        amount=t["amount"], description=t.get("description")
+
+    emoji = "💰" if t["type"] == "income" else "💸"
+    sign = "+" if t["type"] == "income" else "-"
+    action = "Доход" if t["type"] == "income" else "Расход"
+
+    _pending_transactions[message.from_user.id] = t
+
+    b = InlineKeyboardBuilder()
+    b.button(text="₽ Рубли", callback_data="tx_cur_RUB")
+    b.button(text="₮ USDT", callback_data="tx_cur_USDT")
+    b.adjust(2)
+
+    await message.answer(
+        f"{emoji} <b>{action}: {t['category']}</b>\n"
+        f"💵 <b>{sign}{t['amount']:,.2f}</b>\n\n"
+        f"В какой валюте записать?",
+        parse_mode="HTML",
+        reply_markup=b.as_markup()
     )
+
+
+@dp.callback_query(F.data.in_({"tx_cur_RUB", "tx_cur_USDT"}))
+async def save_transaction_currency(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    t = _pending_transactions.pop(user_id, None)
+    if not t:
+        await callback.answer("Запись устарела, введи снова", show_alert=True)
+        return
+
+    currency = "RUB" if callback.data == "tx_cur_RUB" else "USDT"
+    sym = "₽" if currency == "RUB" else "₮"
+
+    await db.add_transaction(
+        user_id=user_id,
+        t_type=t["type"],
+        category=t["category"],
+        amount=t["amount"],
+        description=t.get("description"),
+        currency=currency
+    )
+
+    # Get current rate for dual display
+    rates = await get_exchange_rates()
+    usdt_rate = rates.get("USDT", 77.0)
+    amount = t["amount"]
+    if currency == "RUB":
+        alt_amount = amount / usdt_rate
+        alt_sym = "₮"
+    else:
+        alt_amount = amount * usdt_rate
+        alt_sym = "₽"
+
     emoji = "💰" if t["type"] == "income" else "💸"
     sign = "+" if t["type"] == "income" else "-"
     action = "Доход записан" if t["type"] == "income" else "Расход записан"
-    await message.answer(
-        f"{emoji} <b>{action}!</b>\n\n📂 {t['category']}\n💵 <b>{sign}{t['amount']:,.0f} ₽</b>\n📝 {t.get('description', '')}",
-        parse_mode="HTML", reply_markup=main_kb()
+
+    await callback.message.edit_text(
+        f"{emoji} <b>{action}!</b>\n\n"
+        f"📂 {t['category']}\n"
+        f"💵 <b>{sign}{amount:,.2f} {sym}</b>\n"
+        f"≈ {sign}{alt_amount:,.2f} {alt_sym}\n"
+        f"📝 {t.get('description', '')}",
+        parse_mode="HTML",
+        reply_markup=main_kb()
     )
 
 async def handle_data_query(message: types.Message, query: dict):
