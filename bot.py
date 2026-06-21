@@ -281,48 +281,43 @@ def get_asset_label(asset_type: str) -> str:
 
 
 async def get_exchange_rates() -> dict:
-    """Fetch live USDT/RUB rate from globally accessible sources."""
+    """Fetch live USDT/RUB rate from Bybit P2P BUY side (green), position 10."""
     import aiohttp
     rates = {"RUB": 1.0}
 
     async with aiohttp.ClientSession() as session:
         usdt_rub = None
 
-        # 1. Bybit P2P
+        # Bybit P2P — BUY сторона (зелёный стакан), берём 10-ю позицию
         try:
             async with session.post(
                 "https://api2.bybit.com/fiat/otc/item/online",
-                json={"userId":"","tokenId":"USDT","currencyId":"RUB","payment":[],"side":"0","size":"5","page":"1","amount":"","authMaker":False,"canTrade":False},
+                json={
+                    "userId": "",
+                    "tokenId": "USDT",
+                    "currencyId": "RUB",
+                    "payment": [],
+                    "side": "1",
+                    "size": "10",
+                    "page": "1",
+                    "amount": "",
+                    "authMaker": False,
+                    "canTrade": False
+                },
                 headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"},
                 timeout=aiohttp.ClientTimeout(total=6)
             ) as r:
                 if r.status == 200:
                     data = await r.json()
                     items = data.get("result", {}).get("items", [])
-                    if items:
-                        prices = [float(item["price"]) for item in items[:3]]
-                        usdt_rub = sum(prices) / len(prices)
+                    if len(items) >= 10:
+                        usdt_rub = float(items[9]["price"])  # 10-я позиция (индекс 9)
+                    elif items:
+                        usdt_rub = float(items[-1]["price"])  # последняя если меньше 10
         except Exception:
             pass
 
-        # 2. OKX P2P
-        if not usdt_rub:
-            try:
-                async with session.get(
-                    "https://www.okx.com/v3/c2c/tradingOrders/books?quoteCurrency=RUB&baseCurrency=USDT&side=sell&paymentMethod=all&userType=all&showTrade=false&showFollow=false&showAlreadyTraded=false&isAbleFilter=false",
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    timeout=aiohttp.ClientTimeout(total=6)
-                ) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        sells = data.get("data", {}).get("sell", [])
-                        if sells:
-                            prices = [float(s["price"]) for s in sells[:3]]
-                            usdt_rub = sum(prices) / len(prices)
-            except Exception:
-                pass
-
-        # 3. CoinGecko запасной
+        # CoinGecko запасной
         if not usdt_rub:
             try:
                 async with session.get(
